@@ -40,8 +40,17 @@ section[data-testid="stSidebar"]{background:#161b22!important;border-right:1px s
   top:62px!important;height:calc(100vh - 62px)!important;
   overflow-y:auto!important;overflow-x:hidden!important;padding-top:0!important;
   min-width:260px!important;max-width:260px!important;}
-button[data-testid="collapsedControl"]{top:70px!important;background:#161b22!important;
-  border:1px solid #30363d!important;color:#8b949e!important;border-radius:0 6px 6px 0!important;}
+button[data-testid="collapsedControl"]{
+  position:fixed!important;top:70px!important;left:0!important;
+  z-index:10000!important;
+  background:#161b22!important;border:1px solid #30363d!important;
+  border-left:none!important;color:#c9d1d9!important;
+  border-radius:0 6px 6px 0!important;
+  width:20px!important;height:40px!important;
+  display:flex!important;align-items:center!important;justify-content:center!important;
+  cursor:pointer!important;opacity:1!important;visibility:visible!important;}
+button[data-testid="collapsedControl"]:hover{
+  background:#21262d!important;color:#58a6ff!important;border-color:#58a6ff!important;}
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] p,
 section[data-testid="stSidebar"] span,
