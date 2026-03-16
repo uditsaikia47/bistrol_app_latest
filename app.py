@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import geopandas as gpd
 import folium
 from folium.plugins import Fullscreen, MiniMap, LocateControl
@@ -144,53 +145,65 @@ TOPBAR_HTML = f"""
 
 st.markdown(CSS + TOPBAR_HTML, unsafe_allow_html=True)
 
-# ── Sidebar toggle button injected directly onto document.body ────────────────
-# CSS position:fixed breaks inside transformed parents (Streamlit sidebar uses
-# translateX to collapse). Solution: create button on body via JS, outside any
-# transformed ancestor.
-st.markdown("""
+# ── Sidebar toggle — must use components.html() so the script actually runs.
+# st.markdown() strips <script> tags. components.html() renders in an iframe;
+# window.parent gives access to the real Streamlit document (same origin).
+components.html("""
 <script>
 (function(){
+  var doc = window.parent.document;
+
   function isExpanded(){
-    var s=document.querySelector('section[data-testid="stSidebar"]');
+    var s = doc.querySelector('section[data-testid="stSidebar"]');
     if(!s) return true;
-    var t=s.style.transform||window.getComputedStyle(s).transform;
-    return !t||t==='none'||t==='matrix(1, 0, 0, 1, 0, 0)';
+    var t = s.style.transform || window.parent.getComputedStyle(s).transform;
+    return !t || t==='none' || t==='matrix(1, 0, 0, 1, 0, 0)';
   }
+
   function nativeBtn(){
-    return document.querySelector('button[data-testid="collapsedControl"]')||
-           document.querySelector('[data-testid="stSidebarCollapseButton"] button')||
-           document.querySelector('section[data-testid="stSidebar"] button');
+    return doc.querySelector('button[data-testid="collapsedControl"]') ||
+           doc.querySelector('[data-testid="stSidebarCollapseButton"] button') ||
+           doc.querySelector('section[data-testid="stSidebar"] button');
   }
+
   function updateBtn(btn){
-    btn.innerHTML=isExpanded()?'&#10094;':'&#10095;';
-    btn.title=isExpanded()?'Collapse panel':'Expand panel';
+    btn.innerHTML = isExpanded() ? '&#10094;' : '&#10095;';
+    btn.title = isExpanded() ? 'Collapse panel' : 'Expand panel';
   }
+
   function setup(){
-    var existing=document.getElementById('fsn-panel-toggle');
-    if(existing){updateBtn(existing);return;}
-    var btn=document.createElement('button');
-    btn.id='fsn-panel-toggle';
+    if(doc.getElementById('fsn-panel-toggle')){
+      updateBtn(doc.getElementById('fsn-panel-toggle'));
+      return;
+    }
+    var btn = doc.createElement('button');
+    btn.id = 'fsn-panel-toggle';
+    btn.style.cssText = [
+      'position:fixed','top:70px','left:0','z-index:999999',
+      'width:22px','height:48px','background:#58a6ff','border:none',
+      'border-radius:0 8px 8px 0','color:#0d1117','font-size:15px',
+      'font-weight:700','cursor:pointer','display:flex',
+      'align-items:center','justify-content:center',
+      'box-shadow:2px 0 10px rgba(88,166,255,0.5)','transition:all .15s'
+    ].join(';');
+    btn.onmouseenter = function(){ this.style.background='#79c0ff'; };
+    btn.onmouseleave = function(){ this.style.background='#58a6ff'; };
     updateBtn(btn);
-    btn.onclick=function(){
-      var nb=nativeBtn();
-      if(nb){nb.click();}
-      else{
-        var s=document.querySelector('section[data-testid="stSidebar"]');
-        if(s){s.style.transform=isExpanded()?'translateX(-100%)':'none';}
-      }
-      setTimeout(function(){updateBtn(btn);},350);
+    btn.onclick = function(){
+      var nb = nativeBtn();
+      if(nb){ nb.click(); }
+      setTimeout(function(){ updateBtn(btn); }, 350);
     };
-    document.body.appendChild(btn);
+    doc.body.appendChild(btn);
   }
-  // Run once + watch for Streamlit rerenders removing the button
+
   setup();
-  new MutationObserver(function(){setup();}).observe(
-    document.body,{childList:true,subtree:false}
+  new MutationObserver(function(){ setup(); }).observe(
+    doc.body, {childList:true, subtree:false}
   );
 })();
 </script>
-""", unsafe_allow_html=True)
+""", height=0)
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 def load_progress(site_names):
@@ -455,7 +468,7 @@ with map_col:
         ".leaflet-control-layers-toggle{width:32px!important;height:32px!important}"
         ".leaflet-control-layers-expanded{padding:6px 10px!important}"
         # North arrow
-        "#mc-compass{position:absolute;top:10px;right:12px;z-index:9999;"
+        "#mc-compass{position:absolute;top:55px;right:12px;z-index:9999;"
         "width:32px;height:32px;background:rgba(13,17,23,0.93);"
         "border:1px solid #30363d;border-radius:50%;"
         "display:flex;align-items:center;justify-content:center;"
