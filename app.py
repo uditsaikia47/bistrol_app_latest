@@ -40,18 +40,13 @@ section[data-testid="stSidebar"]{background:#161b22!important;border-right:1px s
   top:62px!important;height:calc(100vh - 62px)!important;
   overflow-y:auto!important;overflow-x:hidden!important;padding-top:0!important;
   min-width:260px!important;max-width:260px!important;}
-button[data-testid="collapsedControl"]{
-  position:fixed!important;top:70px!important;left:0!important;
-  z-index:99999!important;
-  background:#58a6ff!important;border:1px solid #58a6ff!important;
-  border-left:none!important;color:#0d1117!important;
-  border-radius:0 8px 8px 0!important;
-  width:22px!important;height:48px!important;
-  display:flex!important;align-items:center!important;justify-content:center!important;
-  cursor:pointer!important;opacity:1!important;visibility:visible!important;
-  box-shadow:2px 0 8px rgba(88,166,255,0.4)!important;}
-button[data-testid="collapsedControl"]:hover{
-  background:#79c0ff!important;color:#0d1117!important;box-shadow:2px 0 12px rgba(88,166,255,0.7)!important;}
+button[data-testid="collapsedControl"]{display:none!important;}
+#fsn-panel-toggle{position:fixed;top:70px;left:0;z-index:999999;
+  width:22px;height:48px;background:#58a6ff;border:none;
+  border-radius:0 8px 8px 0;color:#0d1117;font-size:15px;font-weight:700;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  box-shadow:2px 0 10px rgba(88,166,255,0.5);transition:all .15s;}
+#fsn-panel-toggle:hover{background:#79c0ff;box-shadow:2px 0 14px rgba(88,166,255,0.8);}
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] p,
 section[data-testid="stSidebar"] span,
@@ -148,6 +143,54 @@ TOPBAR_HTML = f"""
 """
 
 st.markdown(CSS + TOPBAR_HTML, unsafe_allow_html=True)
+
+# ── Sidebar toggle button injected directly onto document.body ────────────────
+# CSS position:fixed breaks inside transformed parents (Streamlit sidebar uses
+# translateX to collapse). Solution: create button on body via JS, outside any
+# transformed ancestor.
+st.markdown("""
+<script>
+(function(){
+  function isExpanded(){
+    var s=document.querySelector('section[data-testid="stSidebar"]');
+    if(!s) return true;
+    var t=s.style.transform||window.getComputedStyle(s).transform;
+    return !t||t==='none'||t==='matrix(1, 0, 0, 1, 0, 0)';
+  }
+  function nativeBtn(){
+    return document.querySelector('button[data-testid="collapsedControl"]')||
+           document.querySelector('[data-testid="stSidebarCollapseButton"] button')||
+           document.querySelector('section[data-testid="stSidebar"] button');
+  }
+  function updateBtn(btn){
+    btn.innerHTML=isExpanded()?'&#10094;':'&#10095;';
+    btn.title=isExpanded()?'Collapse panel':'Expand panel';
+  }
+  function setup(){
+    var existing=document.getElementById('fsn-panel-toggle');
+    if(existing){updateBtn(existing);return;}
+    var btn=document.createElement('button');
+    btn.id='fsn-panel-toggle';
+    updateBtn(btn);
+    btn.onclick=function(){
+      var nb=nativeBtn();
+      if(nb){nb.click();}
+      else{
+        var s=document.querySelector('section[data-testid="stSidebar"]');
+        if(s){s.style.transform=isExpanded()?'translateX(-100%)':'none';}
+      }
+      setTimeout(function(){updateBtn(btn);},350);
+    };
+    document.body.appendChild(btn);
+  }
+  // Run once + watch for Streamlit rerenders removing the button
+  setup();
+  new MutationObserver(function(){setup();}).observe(
+    document.body,{childList:true,subtree:false}
+  );
+})();
+</script>
+""", unsafe_allow_html=True)
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 def load_progress(site_names):
