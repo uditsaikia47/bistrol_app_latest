@@ -42,15 +42,16 @@ section[data-testid="stSidebar"]{background:#161b22!important;border-right:1px s
   min-width:260px!important;max-width:260px!important;}
 button[data-testid="collapsedControl"]{
   position:fixed!important;top:70px!important;left:0!important;
-  z-index:10000!important;
-  background:#161b22!important;border:1px solid #30363d!important;
-  border-left:none!important;color:#c9d1d9!important;
-  border-radius:0 6px 6px 0!important;
-  width:20px!important;height:40px!important;
+  z-index:99999!important;
+  background:#58a6ff!important;border:1px solid #58a6ff!important;
+  border-left:none!important;color:#0d1117!important;
+  border-radius:0 8px 8px 0!important;
+  width:22px!important;height:48px!important;
   display:flex!important;align-items:center!important;justify-content:center!important;
-  cursor:pointer!important;opacity:1!important;visibility:visible!important;}
+  cursor:pointer!important;opacity:1!important;visibility:visible!important;
+  box-shadow:2px 0 8px rgba(88,166,255,0.4)!important;}
 button[data-testid="collapsedControl"]:hover{
-  background:#21262d!important;color:#58a6ff!important;border-color:#58a6ff!important;}
+  background:#79c0ff!important;color:#0d1117!important;box-shadow:2px 0 12px rgba(88,166,255,0.7)!important;}
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] p,
 section[data-testid="stSidebar"] span,
@@ -411,7 +412,7 @@ with map_col:
         ".leaflet-control-layers-toggle{width:32px!important;height:32px!important}"
         ".leaflet-control-layers-expanded{padding:6px 10px!important}"
         # North arrow
-        "#mc-compass{position:absolute;bottom:90px;right:12px;z-index:9999;"
+        "#mc-compass{position:absolute;top:10px;right:12px;z-index:9999;"
         "width:32px;height:32px;background:rgba(13,17,23,0.93);"
         "border:1px solid #30363d;border-radius:50%;"
         "display:flex;align-items:center;justify-content:center;"
