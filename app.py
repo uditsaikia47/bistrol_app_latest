@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import geopandas as gpd
 import folium
 from folium.plugins import Fullscreen, MiniMap, LocateControl
@@ -41,13 +40,8 @@ section[data-testid="stSidebar"]{background:#161b22!important;border-right:1px s
   top:62px!important;height:calc(100vh - 62px)!important;
   overflow-y:auto!important;overflow-x:hidden!important;padding-top:0!important;
   min-width:260px!important;max-width:260px!important;}
-button[data-testid="collapsedControl"]{display:none!important;}
-#fsn-panel-toggle{position:fixed;top:70px;left:0;z-index:999999;
-  width:22px;height:48px;background:#58a6ff;border:none;
-  border-radius:0 8px 8px 0;color:#0d1117;font-size:15px;font-weight:700;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;
-  box-shadow:2px 0 10px rgba(88,166,255,0.5);transition:all .15s;}
-#fsn-panel-toggle:hover{background:#79c0ff;box-shadow:2px 0 14px rgba(88,166,255,0.8);}
+button[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapseButton"]{display:none!important;}
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] p,
 section[data-testid="stSidebar"] span,
@@ -145,65 +139,6 @@ TOPBAR_HTML = f"""
 
 st.markdown(CSS + TOPBAR_HTML, unsafe_allow_html=True)
 
-# ── Sidebar toggle — must use components.html() so the script actually runs.
-# st.markdown() strips <script> tags. components.html() renders in an iframe;
-# window.parent gives access to the real Streamlit document (same origin).
-components.html("""
-<script>
-(function(){
-  var doc = window.parent.document;
-
-  function isExpanded(){
-    var s = doc.querySelector('section[data-testid="stSidebar"]');
-    if(!s) return true;
-    var t = s.style.transform || window.parent.getComputedStyle(s).transform;
-    return !t || t==='none' || t==='matrix(1, 0, 0, 1, 0, 0)';
-  }
-
-  function nativeBtn(){
-    return doc.querySelector('button[data-testid="collapsedControl"]') ||
-           doc.querySelector('[data-testid="stSidebarCollapseButton"] button') ||
-           doc.querySelector('section[data-testid="stSidebar"] button');
-  }
-
-  function updateBtn(btn){
-    btn.innerHTML = isExpanded() ? '&#10094;' : '&#10095;';
-    btn.title = isExpanded() ? 'Collapse panel' : 'Expand panel';
-  }
-
-  function setup(){
-    if(doc.getElementById('fsn-panel-toggle')){
-      updateBtn(doc.getElementById('fsn-panel-toggle'));
-      return;
-    }
-    var btn = doc.createElement('button');
-    btn.id = 'fsn-panel-toggle';
-    btn.style.cssText = [
-      'position:fixed','top:70px','left:0','z-index:999999',
-      'width:22px','height:48px','background:#58a6ff','border:none',
-      'border-radius:0 8px 8px 0','color:#0d1117','font-size:15px',
-      'font-weight:700','cursor:pointer','display:flex',
-      'align-items:center','justify-content:center',
-      'box-shadow:2px 0 10px rgba(88,166,255,0.5)','transition:all .15s'
-    ].join(';');
-    btn.onmouseenter = function(){ this.style.background='#79c0ff'; };
-    btn.onmouseleave = function(){ this.style.background='#58a6ff'; };
-    updateBtn(btn);
-    btn.onclick = function(){
-      var nb = nativeBtn();
-      if(nb){ nb.click(); }
-      setTimeout(function(){ updateBtn(btn); }, 350);
-    };
-    doc.body.appendChild(btn);
-  }
-
-  setup();
-  new MutationObserver(function(){ setup(); }).observe(
-    doc.body, {childList:true, subtree:false}
-  );
-})();
-</script>
-""", height=0)
 
 # ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 def load_progress(site_names):
