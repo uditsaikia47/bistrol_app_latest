@@ -1,26 +1,111 @@
 import streamlit as st
 import geopandas as gpd
 import folium
-from folium.plugins import Fullscreen, MiniMap
+from folium.plugins import Fullscreen, MiniMap, LocateControl
 from streamlit_folium import st_folium
 from geopy.distance import geodesic
+from branca.element import MacroElement
+from jinja2 import Template
 import base64
 import os
+import json
+import pandas as pd
+
+# ── Leaflet Routing Machine control ──────────────────────────────────────────
+# header macro loads LRM AFTER Leaflet (folium renders plugins after its own deps)
+# script macro runs after map init — safe to call L.Routing
+class RoutingControl(MacroElement):
+    """Real road routing via OSRM, dark-themed panel."""
+    def __init__(self, src, tgt, mode, color):
+        super().__init__()
+        self._name = "RoutingControl"
+        self.src_lat = src[0]; self.src_lng = src[1]
+        self.tgt_lat = tgt[0]; self.tgt_lng = tgt[1]
+        self.profile = "car" if mode == "drive" else "foot"
+        self.color   = color
+        self._template = Template("""
+            {% macro header(this, kwargs) %}
+            <link rel="stylesheet"
+              href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css"/>
+            <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.min.js">
+            </script>
+            <style>
+            .leaflet-routing-container{
+              background:rgba(13,17,23,0.96)!important;border:1px solid #30363d!important;
+              border-radius:8px!important;color:#c9d1d9!important;
+              font-family:Inter,sans-serif!important;font-size:11px!important;
+              max-width:270px!important;box-shadow:0 4px 18px rgba(0,0,0,.7)!important;}
+            .leaflet-routing-container h2{
+              font-size:10px!important;color:#8b949e!important;text-transform:uppercase!important;
+              letter-spacing:1.5px!important;padding:8px 12px 4px!important;
+              border-bottom:1px solid #21262d!important;margin:0!important;}
+            .leaflet-routing-container h3{
+              font-size:11px!important;color:#58a6ff!important;
+              padding:6px 12px 2px!important;margin:0!important;}
+            .leaflet-routing-alt{
+              max-height:180px!important;overflow-y:auto!important;
+              scrollbar-width:thin!important;scrollbar-color:#30363d #0d1117!important;}
+            .leaflet-routing-alt::-webkit-scrollbar{width:3px;}
+            .leaflet-routing-alt::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px;}
+            .leaflet-routing-alt table{width:100%!important;}
+            .leaflet-routing-alt td{
+              padding:4px 10px!important;color:#c9d1d9!important;
+              border-bottom:1px solid #161b22!important;
+              font-size:11px!important;vertical-align:middle!important;}
+            .leaflet-routing-alt tr:hover td{background:#161b22!important;}
+            .leaflet-routing-collapse-btn{
+              background:rgba(13,17,23,0.96)!important;color:#58a6ff!important;
+              border:1px solid #30363d!important;border-radius:0 6px 6px 0!important;
+              font-size:14px!important;width:20px!important;}
+            .leaflet-routing-icon{background-image:
+              url(https://unpkg.com/leaflet-routing-machine@3.2.12/dist/icons.png)!important;}
+            </style>
+            {% endmacro %}
+
+            {% macro script(this, kwargs) %}
+            (function(){
+              var rc = L.Routing.control({
+                waypoints:[
+                  L.latLng({{ this.src_lat }},{{ this.src_lng }}),
+                  L.latLng({{ this.tgt_lat }},{{ this.tgt_lng }})
+                ],
+                router: L.Routing.osrmv1({
+                  serviceUrl:'https://router.project-osrm.org/route/v1',
+                  profile:'{{ this.profile }}'
+                }),
+                routeWhileDragging:false,
+                addWaypoints:false,
+                fitSelectedRoutes:true,
+                showAlternatives:false,
+                collapsible:true,
+                collapsed:false,
+                lineOptions:{
+                  styles:[{color:'{{ this.color }}',weight:5,opacity:0.85}],
+                  extendToWaypoints:false,
+                  missingRouteTolerance:0
+                },
+                createMarker:function(){return null;}
+              }).addTo({{ this._parent.get_name() }});
+              rc.on('routingerror',function(e){console.warn('Routing error:',e);});
+            })();
+            {% endmacro %}
+        """)
 
 st.set_page_config(layout="wide", page_title="Field Survey Navigator", page_icon="🗺️")
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(BASE, "idEMAs66s4_1773329559498.png")
+BASE         = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH    = os.path.join(BASE, "idEMAs66s4_1773329559498.png")
+PROGRESS_FILE = os.path.join(BASE, "survey_progress.json")
+
 logo_b64 = ""
 if os.path.exists(LOGO_PATH):
     with open(LOGO_PATH, "rb") as f:
         logo_b64 = base64.b64encode(f.read()).decode()
 logo_html = (f'<img src="data:image/png;base64,{logo_b64}" style="height:36px;object-fit:contain">') if logo_b64 else ""
 
-TOPBAR_H = 62
-MAP_H    = 700
+MAP_H = 700
 
-# ── CSS ────────────────────────────────────────────────────────
+# ── CSS ─────────────────────────────────────────────────────────────────────
 CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -37,8 +122,8 @@ section[data-testid="stSidebar"]{background:#161b22!important;border-right:1px s
   top:62px!important;height:calc(100vh - 62px)!important;
   overflow-y:auto!important;overflow-x:hidden!important;padding-top:0!important;
   min-width:260px!important;max-width:260px!important;}
-button[data-testid="collapsedControl"]{top:70px!important;background:#161b22!important;
-  border:1px solid #30363d!important;color:#8b949e!important;border-radius:0 6px 6px 0!important;}
+button[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapseButton"]{display:none!important;}
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] p,
 section[data-testid="stSidebar"] span,
@@ -76,7 +161,7 @@ div[data-testid="column"]:last-child>div[data-testid="stVerticalBlock"]::-webkit
 .metric-box .val.orange{color:#d29922;}
 .metric-box .lbl{font-size:9px;color:#8b949e;text-transform:uppercase;letter-spacing:1.5px;margin-top:4px;}
 .sel-card{background:#0d1117;border:1px solid #21262d;border-left:3px solid #58a6ff;
-  border-radius:8px;padding:10px 12px;margin-bottom:2px;}
+  border-radius:8px;padding:10px 12px;margin-bottom:6px;}
 .sel-card .sc-name{font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:4px;line-height:1.3;}
 .sel-card .sc-row{font-size:11px;color:#8b949e;line-height:1.9;}
 .sel-card .sc-row b{color:#c9d1d9;}
@@ -90,11 +175,21 @@ div[data-testid="column"]:last-child .stButton>button{
   border-radius:6px!important;font-size:11px!important;font-weight:600!important;
   padding:6px 4px!important;width:100%!important;transition:all .15s;}
 div[data-testid="column"]:last-child .stButton>button:hover{border-color:#58a6ff!important;color:#58a6ff!important;background:#161b22!important;}
-div[data-testid="column"]:last-child .stCheckbox{margin-bottom:0!important;padding:0!important;border-bottom:1px solid #161b22!important;}
-div[data-testid="column"]:last-child .stCheckbox label{font-size:10px!important;color:#8b949e!important;line-height:1.4!important;padding:5px 2px!important;display:block!important;}
-div[data-testid="column"]:last-child .stCheckbox label:hover{color:#c9d1d9!important;}
 div[data-testid="column"]:last-child div[data-testid="stVerticalBlockBorderWrapper"]>div{
   background:#0d1117!important;border:1px solid #21262d!important;border-radius:6px!important;padding:4px 8px!important;}
+div[data-testid="column"]:last-child .stTextArea textarea{
+  background:#0d1117!important;color:#c9d1d9!important;border:1px solid #30363d!important;
+  border-radius:6px!important;font-size:11px!important;resize:none!important;}
+div[data-testid="column"]:last-child .stTextArea textarea:focus{border-color:#58a6ff!important;}
+div[data-testid="column"]:last-child .stExpander{border:1px solid #21262d!important;border-radius:6px!important;background:#0d1117!important;}
+div[data-testid="column"]:last-child .stExpander summary{font-size:10px!important;color:#8b949e!important;padding:4px 8px!important;}
+div[data-testid="column"]:last-child .stRadio>div{gap:4px!important;}
+div[data-testid="column"]:last-child .stRadio label{font-size:10px!important;color:#8b949e!important;padding:2px 6px!important;}
+div[data-testid="column"]:last-child .stDownloadButton>button{
+  background:#21262d!important;color:#58a6ff!important;border:1px solid #30363d!important;
+  border-radius:6px!important;font-size:11px!important;font-weight:600!important;
+  padding:6px 4px!important;width:100%!important;transition:all .15s;}
+div[data-testid="column"]:last-child .stDownloadButton>button:hover{border-color:#58a6ff!important;background:#161b22!important;}
 .sb-hdr{font-size:9px;font-weight:700;color:#8b949e;text-transform:uppercase;
   letter-spacing:2.5px;border-bottom:1px solid #21262d;padding-bottom:5px;margin:16px 0 8px 0;}
 .s-item{font-size:11px;padding:5px 2px;border-bottom:1px solid #161b22;line-height:1.4;}
@@ -109,6 +204,8 @@ div[data-testid="column"]:last-child div[data-testid="stVerticalBlockBorderWrapp
 .nearby-card .nc-status{font-size:10px;margin-top:1px;}
 .nearby-card .nc-status.done{color:#3fb950;}
 .nearby-card .nc-status.pend{color:#8b949e;}
+.done-btn button{border-color:#3fb950!important;color:#3fb950!important;}
+.pend-btn button{border-color:#d29922!important;color:#d29922!important;}
 </style>
 """
 
@@ -124,7 +221,28 @@ TOPBAR_HTML = f"""
 
 st.markdown(CSS + TOPBAR_HTML, unsafe_allow_html=True)
 
-# ─── LOAD DATA ───────────────────────────────────────────────
+
+# ─── PERSISTENCE ─────────────────────────────────────────────────────────────
+def load_progress(site_names):
+    if os.path.exists(PROGRESS_FILE):
+        try:
+            with open(PROGRESS_FILE) as f:
+                data = json.load(f)
+            done  = {n: data.get("done",  {}).get(n, False) for n in site_names}
+            notes = {n: data.get("notes", {}).get(n, "")    for n in site_names}
+            return done, notes
+        except Exception:
+            pass
+    return {n: False for n in site_names}, {n: "" for n in site_names}
+
+def save_progress(done_dict, notes_dict):
+    try:
+        with open(PROGRESS_FILE, "w") as f:
+            json.dump({"done": done_dict, "notes": notes_dict}, f, indent=2)
+    except Exception:
+        pass
+
+# ─── LOAD DATA ───────────────────────────────────────────────────────────────
 @st.cache_data
 def load_sites(path):
     gdf = gpd.read_file(path)
@@ -136,40 +254,51 @@ def load_sites(path):
     gdf["lon"] = cents.x
     return gdf
 
-PATH  = os.path.join(BASE, "sites_app.geojson")
-sites = load_sites(PATH)
+PATH      = os.path.join(BASE, "sites_app.geojson")
+sites_raw = load_sites(PATH)
 
-# ─── SESSION STATE ───────────────────────────────────────────
-if "done"          not in st.session_state: st.session_state.done          = {n: False for n in sites["Site_Name"]}
-if "selected_site" not in st.session_state: st.session_state.selected_site = sites["Site_Name"].iloc[0]
+# ─── SESSION STATE ────────────────────────────────────────────────────────────
+if "progress_loaded" not in st.session_state:
+    _names = sites_raw["Site_Name"].tolist()
+    _done, _notes = load_progress(_names)
+    st.session_state.done           = _done
+    st.session_state.notes          = _notes
+    st.session_state.progress_loaded = True
+
+if "selected_site" not in st.session_state: st.session_state.selected_site = sites_raw["Site_Name"].iloc[0]
 if "initial_load"  not in st.session_state: st.session_state.initial_load  = True
 if "prev_selected" not in st.session_state: st.session_state.prev_selected = st.session_state.selected_site
 if "zoom_to_site"  not in st.session_state: st.session_state.zoom_to_site  = False
 if "route_mode"    not in st.session_state: st.session_state.route_mode    = None
 if "route_target"  not in st.session_state: st.session_state.route_target  = None
 
-# ─── HELPERS ─────────────────────────────────────────────────
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
 def fmt_time(hours):
-    m = int(hours * 60)
-    return f"{m} min" if m < 60 else f"{m//60}h {m%60:02d}min"
+    mins = int(hours * 60)
+    return f"{mins} min" if mins < 60 else f"{mins//60}h {mins%60:02d}min"
 
-def calc_distances(origin_loc, gdf):
-    gdf = gdf.copy()
+@st.cache_data
+def calc_distances(origin_lat, origin_lon, _gdf):
+    """Cached per origin point. _gdf excluded from hash key (prefix _)."""
+    gdf = _gdf.copy()
+    origin_loc = (origin_lat, origin_lon)
     dists, dmiles, drive, walk = [], [], [], []
     for _, r in gdf.iterrows():
         d = geodesic(origin_loc, (r["lat"], r["lon"])).km
-        dists.append(round(d, 2)); dmiles.append(round(d * 0.621371, 2))
-        drive.append(fmt_time(d / 60)); walk.append(fmt_time(d / 5))
+        dists.append(round(d, 2))
+        dmiles.append(round(d * 0.621371, 2))
+        drive.append(fmt_time(d / 50))   # 50 km/h — realistic UK average
+        walk.append(fmt_time(d / 5))     # 5 km/h walking
     gdf["distance_km"]    = dists
     gdf["distance_miles"] = dmiles
     gdf["drive_fmt"]      = drive
     gdf["walk_fmt"]       = walk
     return gdf
 
-# ─── COMPUTE ─────────────────────────────────────────────────
-sel_row  = sites[sites["Site_Name"] == st.session_state.selected_site].iloc[0]
+# ─── COMPUTE ─────────────────────────────────────────────────────────────────
+sel_row  = sites_raw[sites_raw["Site_Name"] == st.session_state.selected_site].iloc[0]
 origin   = (sel_row["lat"], sel_row["lon"])
-sites    = calc_distances(origin, sites)
+sites    = calc_distances(origin[0], origin[1], sites_raw)
 sites_az = sites.sort_values("Site_Name").reset_index(drop=True)
 filtered = sites
 sel      = sites[sites["Site_Name"] == st.session_state.selected_site].iloc[0]
@@ -179,8 +308,23 @@ pending_list = [n for n, v in st.session_state.done.items() if not v]
 done_count   = len(done_list)
 total        = len(sites)
 
-# ─── SIDEBAR ─────────────────────────────────────────────────
+# ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # Summary strip
+    pct = int(done_count / total * 100) if total else 0
+    st.markdown(f"""
+    <div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+        padding:10px 14px;margin:12px 0 10px 0;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:20px;font-weight:700;color:#58a6ff;line-height:1">{pct}%</div>
+        <div style="font-size:9px;color:#8b949e;text-transform:uppercase;letter-spacing:1.5px;margin-top:2px">Complete</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:11px;color:#3fb950">{done_count} surveyed</div>
+        <div style="font-size:11px;color:#d29922">{total - done_count} remaining</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
     st.markdown('<div class="sb-hdr">Search & Filter</div>', unsafe_allow_html=True)
     search = st.text_input("Search site", placeholder="Type site name...", key="search_input", label_visibility="collapsed")
     if search:
@@ -202,9 +346,22 @@ with st.sidebar:
     st.markdown('<div class="sb-hdr">Radius</div>', unsafe_allow_html=True)
     radius_miles = st.slider("Radius (miles)", 1, 150, 1, label_visibility="collapsed")
     radius_km    = radius_miles * 1.60934
-    st.markdown(f'<div style="font-size:11px;color:#8b949e;margin-top:-4px">{radius_miles} miles = {round(radius_km,1)} km</div>', unsafe_allow_html=True)
 
-    nearby_sites = sites[(sites["distance_miles"] <= radius_miles) & (sites["Site_Name"] != st.session_state.selected_site)].sort_values("distance_km")
+    nearby_sites = sites[
+        (sites["distance_miles"] <= radius_miles) &
+        (sites["Site_Name"] != st.session_state.selected_site)
+    ].sort_values("distance_km")
+
+    n_nearby_done    = sum(st.session_state.done.get(n, False) for n in nearby_sites["Site_Name"])
+    n_nearby_pending = len(nearby_sites) - n_nearby_done
+
+    st.markdown(
+        f'<div style="font-size:11px;color:#8b949e;margin-top:-4px;margin-bottom:6px">'
+        f'{radius_miles} mi = {round(radius_km,1)} km &nbsp;·&nbsp; '
+        f'<span style="color:#3fb950">{n_nearby_done} done</span> &nbsp;'
+        f'<span style="color:#d29922">{n_nearby_pending} pending</span></div>',
+        unsafe_allow_html=True
+    )
     st.markdown(f'<div class="sb-hdr">{len(nearby_sites)} Nearby Sites (within {radius_miles} mi)</div>', unsafe_allow_html=True)
 
     if nearby_sites.empty:
@@ -216,14 +373,23 @@ with st.sidebar:
             card_cls = "done-card" if is_done else "pend-card"
             status   = "Surveyed" if is_done else "Pending"
             st_cls   = "done" if is_done else "pend"
-            st.markdown(f'<div class="nearby-card {card_cls}"><div class="nc-name">{name}</div>'
-                        f'<div class="nc-info">{row["distance_miles"]} mi / {row["distance_km"]} km &nbsp;·&nbsp; Drive: {row["drive_fmt"]} &nbsp;·&nbsp; Walk: {row["walk_fmt"]}</div>'
-                        f'<div class="nc-status {st_cls}">{status}</div></div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="nearby-card {card_cls}">'
+                f'<div class="nc-name">{name}</div>'
+                f'<div class="nc-info">{row["distance_miles"]} mi / {row["distance_km"]} km'
+                f' &nbsp;·&nbsp; Drive: {row["drive_fmt"]} &nbsp;·&nbsp; Walk: {row["walk_fmt"]}</div>'
+                f'<div class="nc-status {st_cls}">{status}</div></div>',
+                unsafe_allow_html=True
+            )
             c1, c2 = st.columns(2)
             if c1.button("By Car",  key=f"car_{name}",  use_container_width=True):
-                st.session_state.route_mode = "drive"; st.session_state.route_target = name; st.rerun()
+                st.session_state.route_mode   = "drive"
+                st.session_state.route_target = name
+                st.rerun()
             if c2.button("Walking", key=f"walk_{name}", use_container_width=True):
-                st.session_state.route_mode = "walk";  st.session_state.route_target = name; st.rerun()
+                st.session_state.route_mode   = "walk"
+                st.session_state.route_target = name
+                st.rerun()
 
     st.markdown('<div class="sb-hdr">Site Status</div>', unsafe_allow_html=True)
     sb_t1, sb_t2 = st.tabs(["  Surveyed  ", "  Remaining  "])
@@ -242,14 +408,15 @@ with st.sidebar:
             else:
                 st.markdown('<div style="font-size:11px;color:#3fb950;padding:6px 2px">All done ✓</div>', unsafe_allow_html=True)
 
-# ─── COLUMNS ─────────────────────────────────────────────────
+# ─── COLUMNS ─────────────────────────────────────────────────────────────────
 map_col, right_col = st.columns([3, 1])
 
-# ─── MAP ─────────────────────────────────────────────────────
+# ─── MAP ─────────────────────────────────────────────────────────────────────
 with map_col:
-    all_lats   = sites["lat"].tolist()
-    all_lons   = sites["lon"].tolist()
-    full_bounds = [[min(all_lats) - .1, min(all_lons) - .1], [max(all_lats) + .1, max(all_lons) + .1]]
+    all_lats    = sites["lat"].tolist()
+    all_lons    = sites["lon"].tolist()
+    full_bounds = [[min(all_lats) - .1, min(all_lons) - .1],
+                   [max(all_lats) + .1, max(all_lons) + .1]]
 
     m = folium.Map(tiles="OpenStreetMap", prefer_canvas=True)
 
@@ -261,38 +428,37 @@ with map_col:
     elif not site_changed and not st.session_state.zoom_to_site:
         m.fit_bounds(full_bounds)
 
-    # ── Plugins — all controls on LEFT side to avoid right-panel overlap ──
+    # ── Plugins ──
     Fullscreen(position="topleft").add_to(m)
     MiniMap(toggle_display=True, position="bottomleft", zoom_level_offset=-6).add_to(m)
+    LocateControl(
+        position="topleft",
+        strings={"title": "Go to my location"},
+        flyTo=True,
+        cacheLocation=False,
+        locateOptions={"enableHighAccuracy": True, "maxZoom": 15}
+    ).add_to(m)
 
-    # ── Custom styles for map controls ──
+    # ── Styles for map controls ──
     _ctrl = (
         "<style>"
-        ".leaflet-top.leaflet-left{"
-        "top:50px!important;left:8px!important}"
-        # Fullscreen button — hide default icon, show SVG via background-image
-        ".fullscreen-icon,"\
-        ".leaflet-control-fullscreen a img,"\
-        ".leaflet-control-fullscreen a span{display:none!important}"
+        ".leaflet-top.leaflet-left{top:50px!important;left:8px!important}"
+        ".fullscreen-icon{background:none!important}"
         ".leaflet-control-fullscreen a{"
         "background:rgba(13,17,23,0.93)!important;"
         "border:1px solid #30363d!important;border-radius:6px!important;"
         "width:32px!important;height:32px!important;"
         "box-shadow:0 2px 8px rgba(0,0,0,.5)!important;"
-        "display:block!important;text-decoration:none!important;"
-        "background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2358a6ff' d='M3 3h7v2H5v5H3V3zm11 0h7v7h-2V5h-5V3zM3 14h2v5h5v2H3v-7zm16 5h-5v2h7v-7h-2v5z'/%3E%3C/svg%3E\")!important;"
-        "background-repeat:no-repeat!important;background-position:center!important;background-size:18px!important}"
-        ".leaflet-control-fullscreen a:hover{"
-        "background-color:#1c2a3a!important}"
-        ".leaflet-fullscreen-on .leaflet-control-fullscreen a{"
-        "background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23f85149' d='M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z'/%3E%3C/svg%3E\")!important}"
+        "display:flex!important;align-items:center!important;justify-content:center!important;"
+        "font-size:18px!important;color:#58a6ff!important;text-decoration:none!important}"
+        ".leaflet-control-fullscreen a:hover{background:#1c2a3a!important;color:#f0f6fc!important}"
+        ".leaflet-control-fullscreen a::after{content:'\\26F6'!important;font-size:16px!important;color:#58a6ff!important}"
+        ".leaflet-fullscreen-on .leaflet-control-fullscreen a::after{content:'\\2716'!important;font-size:14px!important;color:#f85149!important}"
+        ".leaflet-control-fullscreen a img,.leaflet-control-fullscreen a span{display:none!important}"
         ".leaflet-fullscreen-on .leaflet-top.leaflet-left{top:10px!important}"
-        ".leaflet-control-zoom{"
-        "border:1px solid #30363d!important;border-radius:6px!important;"
-        "overflow:hidden!important;box-shadow:0 2px 8px rgba(0,0,0,.5)!important;"
-        "margin:0 0 6px 0!important}"
-        ".leaflet-control-zoom a{"
-        "width:32px!important;height:32px!important;line-height:32px!important;"
+        ".leaflet-control-zoom{border:1px solid #30363d!important;border-radius:6px!important;"
+        "overflow:hidden!important;box-shadow:0 2px 8px rgba(0,0,0,.5)!important;margin:0 0 6px 0!important}"
+        ".leaflet-control-zoom a{width:32px!important;height:32px!important;line-height:32px!important;"
         "font-size:20px!important;font-weight:700!important;"
         "background:rgba(13,17,23,0.93)!important;color:#58a6ff!important;"
         "border-bottom:1px solid #30363d!important;"
@@ -300,54 +466,50 @@ with map_col:
         ".leaflet-control-zoom-out{border-bottom:none!important}"
         ".leaflet-control-zoom a:hover{background:#1c2a3a!important;color:#f0f6fc!important}"
         ".leaflet-control-fullscreen{margin:0 0 6px 0!important;clear:both!important}"
-        ".leaflet-control-layers{"
-        "background:rgba(13,17,23,0.93)!important;color:#c9d1d9!important;"
+        # LocateControl styles
+        ".leaflet-control-locate{margin:0 0 6px 0!important;clear:both!important}"
+        ".leaflet-control-locate a{background:rgba(13,17,23,0.93)!important;"
         "border:1px solid #30363d!important;border-radius:6px!important;"
+        "width:32px!important;height:32px!important;"
         "box-shadow:0 2px 8px rgba(0,0,0,.5)!important;"
-        "margin:0!important;clear:both!important}"
+        "display:flex!important;align-items:center!important;justify-content:center!important;"
+        "text-decoration:none!important}"
+        ".leaflet-control-locate a .fa{color:#58a6ff!important;font-size:14px!important}"
+        ".leaflet-control-locate.active a .fa{color:#3fb950!important}"
+        ".leaflet-control-locate.active.following a .fa{color:#d29922!important}"
+        # LayerControl styles
+        ".leaflet-control-layers{background:rgba(13,17,23,0.93)!important;color:#c9d1d9!important;"
+        "border:1px solid #30363d!important;border-radius:6px!important;"
+        "box-shadow:0 2px 8px rgba(0,0,0,.5)!important;margin:0!important;clear:both!important}"
         ".leaflet-control-layers label{color:#c9d1d9!important}"
         ".leaflet-control-layers-toggle{width:32px!important;height:32px!important}"
         ".leaflet-control-layers-expanded{padding:6px 10px!important}"
-        # Compass control styling (rendered as a Leaflet topright control)
-        ".mc-compass{"
+        # North arrow
+        "#mc-compass{position:absolute;top:55px;right:12px;z-index:9999;"
         "width:32px;height:32px;background:rgba(13,17,23,0.93);"
         "border:1px solid #30363d;border-radius:50%;"
         "display:flex;align-items:center;justify-content:center;"
         "font-size:11px;font-weight:700;color:#58a6ff;"
-        "box-shadow:0 2px 8px rgba(0,0,0,.5);pointer-events:none;"
-        "font-family:Inter,sans-serif;line-height:1}"
+        "box-shadow:0 2px 8px rgba(0,0,0,.5);pointer-events:none}"
         "</style>"
+        '<div id="mc-compass">N&#8593;</div>'
     )
     m.get_root().html.add_child(folium.Element(_ctrl))
 
-    # ── Compass as a proper Leaflet topright control ──
-    _map_var = m.get_name()
-    _compass_js = f"""<script>
-(function(){{
-  var CompassCtrl = L.Control.extend({{
-    options: {{ position: 'topright' }},
-    onAdd: function() {{
-      var d = L.DomUtil.create('div', 'mc-compass');
-      d.innerHTML = 'N\u2191';
-      return d;
-    }}
-  }});
-  {_map_var}.addControl(new CompassCtrl());
-}})();
-</script>"""
-    m.get_root().html.add_child(folium.Element(_compass_js))
-
     # ── Radius circle + origin marker ──
-    folium.Circle(location=list(origin), radius=radius_km * 1000,
+    folium.Circle(
+        location=list(origin), radius=radius_km * 1000,
         color="#f85149", weight=1.5, fill=True, fill_color="#f85149", fill_opacity=0.04,
-        dash_array="8 5", tooltip=f"{radius_miles} miles / {round(radius_km,1)} km from selected site"
+        dash_array="8 5",
+        tooltip=f"{radius_miles} miles / {round(radius_km,1)} km from selected site"
     ).add_to(m)
-    folium.CircleMarker(location=list(origin), radius=8, color="white",
+    folium.CircleMarker(
+        location=list(origin), radius=8, color="white",
         fill=True, fill_color="#d29922", fill_opacity=1.0, weight=3,
         tooltip=f"Origin: {st.session_state.selected_site}"
     ).add_to(m)
 
-    # ── Route line ──
+    # ── Real road routing via Leaflet Routing Machine + OSRM ──
     if st.session_state.route_target and st.session_state.route_mode:
         tgt_rows = sites[sites["Site_Name"] == st.session_state.route_target]
         if not tgt_rows.empty:
@@ -356,39 +518,25 @@ with map_col:
             tgt_loc  = [tr["lat"], tr["lon"]]
             mode     = st.session_state.route_mode
             col_line = "#d29922" if mode == "drive" else "#3fb950"
-            label    = "By Car" if mode == "drive" else "Walking"
-            time_str = tr["drive_fmt"] if mode == "drive" else tr["walk_fmt"]
-            gm_mode  = "driving" if mode == "drive" else "walking"
-            gm_url   = (f"https://www.google.com/maps/dir/?api=1"
-                        f"&origin={src_loc[0]},{src_loc[1]}"
-                        f"&destination={tgt_loc[0]},{tgt_loc[1]}&travelmode={gm_mode}")
-            folium.PolyLine(locations=[src_loc, tgt_loc], color=col_line, weight=4,
-                opacity=.9, dash_array="10 6" if mode == "walk" else None,
-                tooltip=f"{label}: {tr['distance_km']} km | {time_str}").add_to(m)
-            mid = [(src_loc[0] + tgt_loc[0]) / 2, (src_loc[1] + tgt_loc[1]) / 2]
-            folium.Marker(location=mid,
+            # Add destination marker
+            label = "By Car" if mode == "drive" else "Walking"
+            folium.Marker(
+                location=tgt_loc,
                 icon=folium.DivIcon(
-                    html=f'<div style="background:{col_line};color:white;padding:3px 8px;'
-                         f'border-radius:4px;font-size:11px;font-weight:700;white-space:nowrap">'
-                         f'{label}: {tr["distance_miles"]} mi | {time_str}</div>',
-                    icon_size=(200, 24), icon_anchor=(100, 12)),
-                popup=folium.Popup(
-                    f'<div style="font-family:Inter,sans-serif;font-size:12px;min-width:190px;line-height:1.9">'
-                    f'<b>{label}</b><br>From: {st.session_state.selected_site}<br>'
-                    f'To: {st.session_state.route_target}<br>'
-                    f'Distance: {tr["distance_km"]} km / {tr["distance_miles"]} mi<br>'
-                    f'Est. Time: {time_str}<br><br>'
-                    f'<a href="{gm_url}" target="_blank" style="color:#58a6ff;font-weight:600">'
-                    f'Open in Google Maps ↗</a></div>', max_width=240)
+                    html=f'<div style="background:{col_line};color:#0d1117;padding:3px 8px;'
+                         f'border-radius:4px;font-size:11px;font-weight:700;white-space:nowrap;'
+                         f'box-shadow:0 2px 6px rgba(0,0,0,.5)">'
+                         f'{label} → {tr["distance_miles"]} mi</div>',
+                    icon_size=(180, 24), icon_anchor=(90, 28))
             ).add_to(m)
-            m.fit_bounds([[min(src_loc[0], tgt_loc[0]) - .02, min(src_loc[1], tgt_loc[1]) - .02],
-                          [max(src_loc[0], tgt_loc[0]) + .02, max(src_loc[1], tgt_loc[1]) + .02]])
+            # Add real-road routing control (draws actual road path via OSRM)
+            RoutingControl(src_loc, tgt_loc, mode, col_line).add_to(m)
 
     # ── Feature groups ──
-    fg_out  = folium.FeatureGroup(name="Out of Range",    show=True)
-    fg_near = folium.FeatureGroup(name="Within Radius",   show=True)
-    fg_done = folium.FeatureGroup(name="Surveyed",        show=True)
-    fg_sel  = folium.FeatureGroup(name="Selected",        show=True)
+    fg_out  = folium.FeatureGroup(name="Out of Range",  show=True)
+    fg_near = folium.FeatureGroup(name="Within Radius", show=True)
+    fg_done = folium.FeatureGroup(name="Surveyed",      show=True)
+    fg_sel  = folium.FeatureGroup(name="Selected",      show=True)
 
     for _, row in sites.iterrows():
         name    = row["Site_Name"]
@@ -396,23 +544,37 @@ with map_col:
         is_done = st.session_state.done.get(name, False)
         is_near = row["distance_miles"] <= radius_miles
         area    = row.get("Area_Ha", "N/A")
+        has_note = bool(st.session_state.notes.get(name, "").strip())
+        note_badge = " 📝" if has_note else ""
+
         if is_done:   fill, border, wt, fg = "#3fb950", "#2ea043", 2, fg_done
         elif is_sel:  fill, border, wt, fg = "#d29922", "#bb8009", 3, fg_sel
         elif is_near: fill, border, wt, fg = "#58a6ff", "#388bfd", 2, fg_near
         else:         fill, border, wt, fg = "#30363d", "#21262d", 1, fg_out
+
         popup_html = (
             f'<div style="font-family:Inter,sans-serif;min-width:210px;border-radius:6px;overflow:hidden">'
             f'<div style="background:#161b22;color:#58a6ff;padding:8px 12px;font-weight:700;'
-            f'font-size:13px;border-bottom:1px solid #30363d">{name}</div>'
+            f'font-size:13px;border-bottom:1px solid #30363d">{name}{note_badge}</div>'
             f'<div style="padding:8px 12px;background:#0d1117;color:#c9d1d9;line-height:2;font-size:12px">'
-            f'Area: <b>{area} ha</b><br>Distance: <b>{row["distance_km"]} km</b> / {row["distance_miles"]} mi<br>'
+            f'Area: <b>{area} ha</b><br>'
+            f'Distance: <b>{row["distance_km"]} km</b> / {row["distance_miles"]} mi<br>'
             f'Drive: <b>{row["drive_fmt"]}</b><br>Walk: <b>{row["walk_fmt"]}</b><br>'
             f'Status: <b style="color:{"#3fb950" if is_done else "#d29922"}">{"Surveyed" if is_done else "Pending"}</b>'
-            f'</div></div>')
-        folium.GeoJson(row.geometry,
-            tooltip=folium.Tooltip(f"{name} | {row['distance_miles']} mi | Drive: {row['drive_fmt']} | Walk: {row['walk_fmt']}", sticky=True),
+            + (f'<br><br><span style="color:#8b949e;font-size:11px">{st.session_state.notes[name]}</span>'
+               if has_note else "") +
+            f'</div></div>'
+        )
+        folium.GeoJson(
+            row.geometry,
+            tooltip=folium.Tooltip(
+                f"{name} | {row['distance_miles']} mi | Drive: {row['drive_fmt']} | Walk: {row['walk_fmt']}",
+                sticky=True
+            ),
             popup=folium.Popup(popup_html, max_width=280),
-            style_function=lambda x, f=fill, b=border, w=wt: {"fillColor": f, "color": b, "weight": w, "fillOpacity": .65},
+            style_function=lambda x, f=fill, b=border, w=wt: {
+                "fillColor": f, "color": b, "weight": w, "fillOpacity": .65
+            },
             highlight_function=lambda x: {"weight": 4, "fillOpacity": .9}
         ).add_to(fg)
 
@@ -421,13 +583,14 @@ with map_col:
     fg_done.add_to(m)
     fg_sel.add_to(m)
 
-    # ── Layer control AFTER feature groups ──
     folium.LayerControl(position="topleft", collapsed=True).add_to(m)
 
     # ── Zoom to selected site ──
-    if (site_changed or st.session_state.zoom_to_site) and not st.session_state.route_mode and not reset_view and not st.session_state.get("initial_load", False):
-        sg  = sites[sites["Site_Name"] == st.session_state.selected_site].geometry.iloc[0]
-        b   = sg.bounds
+    if (site_changed or st.session_state.zoom_to_site) and \
+       not st.session_state.route_mode and not reset_view and \
+       not st.session_state.get("initial_load", False):
+        sg   = sites[sites["Site_Name"] == st.session_state.selected_site].geometry.iloc[0]
+        b    = sg.bounds
         span = max(b[2] - b[0], b[3] - b[1])
         pad  = max(0.003, min(0.02, span * 2.0))
         m.fit_bounds([[b[1] - pad, b[0] - pad], [b[3] + pad, b[2] + pad]])
@@ -452,27 +615,64 @@ with map_col:
                 st.session_state.route_target  = None
                 st.rerun()
 
-# ─── RIGHT PANEL ─────────────────────────────────────────────
+# ─── RIGHT PANEL ─────────────────────────────────────────────────────────────
 with right_col:
+    # ── Progress ──
     st.markdown('<div class="sec-hdr">Progress</div>', unsafe_allow_html=True)
     st.progress(done_count / total if total else 0)
     st.markdown(f"""
     <div class="metric-row">
         <div class="metric-box"><div class="val">{total}</div><div class="lbl">Total</div></div>
         <div class="metric-box"><div class="val green">{done_count}</div><div class="lbl">Done</div></div>
-        <div class="metric-box"><div class="val orange">{total-done_count}</div><div class="lbl">Left</div></div>
+        <div class="metric-box"><div class="val orange">{total - done_count}</div><div class="lbl">Left</div></div>
     </div>""", unsafe_allow_html=True)
 
-    area   = sel.get("Area_Ha", "N/A")
-    status = "Surveyed" if st.session_state.done.get(sel["Site_Name"], False) else "Pending"
-    scol   = "#3fb950" if status == "Surveyed" else "#d29922"
+    # ── Selected Site ──
+    sel_name = sel["Site_Name"]
+    area     = sel.get("Area_Ha", "N/A")
+    is_sel_done = st.session_state.done.get(sel_name, False)
+    status   = "Surveyed" if is_sel_done else "Pending"
+    scol     = "#3fb950" if is_sel_done else "#d29922"
+
     st.markdown('<div class="sec-hdr">Selected Site</div>', unsafe_allow_html=True)
     st.markdown(f"""
     <div class="sel-card">
-        <div class="sc-name">{sel['Site_Name']}</div>
-        <div class="sc-row">Area: <b>{area} ha</b><br>Status: <b style="color:{scol}">{status}</b></div>
+        <div class="sc-name">{sel_name}</div>
+        <div class="sc-row">
+            Area: <b>{area} ha</b><br>
+            Dist: <b>{sel['distance_km']} km</b> / {sel['distance_miles']} mi<br>
+            Drive: <b>{sel['drive_fmt']}</b> &nbsp;·&nbsp; Walk: <b>{sel['walk_fmt']}</b><br>
+            Status: <b style="color:{scol}">{status}</b>
+        </div>
     </div>""", unsafe_allow_html=True)
 
+    # Quick toggle button
+    btn_label = "✓ Mark as Surveyed" if not is_sel_done else "↩ Mark as Pending"
+    btn_div   = "done-btn" if not is_sel_done else "pend-btn"
+    st.markdown(f'<div class="{btn_div}">', unsafe_allow_html=True)
+    if st.button(btn_label, use_container_width=True, key="btn_toggle"):
+        st.session_state.done[sel_name] = not is_sel_done
+        save_progress(st.session_state.done, st.session_state.notes)
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Notes
+    def _save_note():
+        st.session_state.notes[sel_name] = st.session_state["note_input"]
+        save_progress(st.session_state.done, st.session_state.notes)
+
+    with st.expander("📝 Field Notes", expanded=bool(st.session_state.notes.get(sel_name, "").strip())):
+        st.text_area(
+            "notes",
+            value=st.session_state.notes.get(sel_name, ""),
+            height=72,
+            key="note_input",
+            on_change=_save_note,
+            placeholder="Add observations, access notes...",
+            label_visibility="collapsed"
+        )
+
+    # ── Jump to Site ──
     st.markdown('<div class="jump-hdr">Jump to Site</div>', unsafe_allow_html=True)
     site_list_az = sorted(filtered["Site_Name"].tolist())
     idx     = site_list_az.index(st.session_state.selected_site) if st.session_state.selected_site in site_list_az else 0
@@ -496,16 +696,25 @@ with right_col:
         st.session_state.route_target = None
         st.rerun()
 
-    st.markdown('<div class="sec-hdr">Survey Checklist</div>', unsafe_allow_html=True)
-    with st.container(height=280):
-        for _, row in sites_az.iterrows():
-            name    = row["Site_Name"]
-            is_near = row["distance_miles"] <= radius_miles
-            is_sel  = name == st.session_state.selected_site
-            done    = st.session_state.done.get(name, False)
-            tag     = "✓" if done else ("◉" if is_sel else ("◎" if is_near else "  "))
-            label   = f"{tag} {name}\n{row['distance_miles']} mi | Drive: {row['drive_fmt']} | Walk: {row['walk_fmt']}"
-            checked = st.checkbox(label, value=done, key=f"chk_{name}")
-            if checked != st.session_state.done.get(name, False):
-                st.session_state.done[name] = checked
-                st.rerun()
+    # ── Export ──
+    st.markdown('<div class="sec-hdr">Export</div>', unsafe_allow_html=True)
+    export_df = pd.DataFrame({
+        "Site":             sites_az["Site_Name"].tolist(),
+        "Area (ha)":        [sites_az.loc[i, "Area_Ha"] if "Area_Ha" in sites_az.columns else "N/A"
+                             for i in sites_az.index],
+        "Distance (km)":    sites_az["distance_km"].tolist(),
+        "Distance (miles)": sites_az["distance_miles"].tolist(),
+        "Drive Time":       sites_az["drive_fmt"].tolist(),
+        "Walk Time":        sites_az["walk_fmt"].tolist(),
+        "Status":           [("Surveyed" if st.session_state.done.get(n) else "Pending")
+                             for n in sites_az["Site_Name"]],
+        "Notes":            [st.session_state.notes.get(n, "") for n in sites_az["Site_Name"]],
+    })
+    st.download_button(
+        "⬇ Export Progress CSV",
+        export_df.to_csv(index=False),
+        file_name="survey_progress.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
