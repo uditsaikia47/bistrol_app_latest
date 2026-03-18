@@ -4,92 +4,29 @@ import folium
 from folium.plugins import Fullscreen, MiniMap, LocateControl
 from streamlit_folium import st_folium
 from geopy.distance import geodesic
-from branca.element import MacroElement
-from jinja2 import Template
+import requests
 import base64
 import os
 import json
 import pandas as pd
 
-# ── Leaflet Routing Machine control ──────────────────────────────────────────
-# header macro loads LRM AFTER Leaflet (folium renders plugins after its own deps)
-# script macro runs after map init — safe to call L.Routing
-class RoutingControl(MacroElement):
-    """Real road routing via OSRM, dark-themed panel."""
-    def __init__(self, src, tgt, mode, color):
-        super().__init__()
-        self._name = "RoutingControl"
-        self.src_lat = src[0]; self.src_lng = src[1]
-        self.tgt_lat = tgt[0]; self.tgt_lng = tgt[1]
-        self.profile = "car" if mode == "drive" else "foot"
-        self.color   = color
-        self._template = Template("""
-            {% macro header(this, kwargs) %}
-            <link rel="stylesheet"
-              href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css"/>
-            <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.min.js">
-            </script>
-            <style>
-            .leaflet-routing-container{
-              background:rgba(13,17,23,0.96)!important;border:1px solid #30363d!important;
-              border-radius:8px!important;color:#c9d1d9!important;
-              font-family:Inter,sans-serif!important;font-size:11px!important;
-              max-width:270px!important;box-shadow:0 4px 18px rgba(0,0,0,.7)!important;}
-            .leaflet-routing-container h2{
-              font-size:10px!important;color:#8b949e!important;text-transform:uppercase!important;
-              letter-spacing:1.5px!important;padding:8px 12px 4px!important;
-              border-bottom:1px solid #21262d!important;margin:0!important;}
-            .leaflet-routing-container h3{
-              font-size:11px!important;color:#58a6ff!important;
-              padding:6px 12px 2px!important;margin:0!important;}
-            .leaflet-routing-alt{
-              max-height:180px!important;overflow-y:auto!important;
-              scrollbar-width:thin!important;scrollbar-color:#30363d #0d1117!important;}
-            .leaflet-routing-alt::-webkit-scrollbar{width:3px;}
-            .leaflet-routing-alt::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px;}
-            .leaflet-routing-alt table{width:100%!important;}
-            .leaflet-routing-alt td{
-              padding:4px 10px!important;color:#c9d1d9!important;
-              border-bottom:1px solid #161b22!important;
-              font-size:11px!important;vertical-align:middle!important;}
-            .leaflet-routing-alt tr:hover td{background:#161b22!important;}
-            .leaflet-routing-collapse-btn{
-              background:rgba(13,17,23,0.96)!important;color:#58a6ff!important;
-              border:1px solid #30363d!important;border-radius:0 6px 6px 0!important;
-              font-size:14px!important;width:20px!important;}
-            .leaflet-routing-icon{background-image:
-              url(https://unpkg.com/leaflet-routing-machine@3.2.12/dist/icons.png)!important;}
-            </style>
-            {% endmacro %}
-
-            {% macro script(this, kwargs) %}
-            (function(){
-              var rc = L.Routing.control({
-                waypoints:[
-                  L.latLng({{ this.src_lat }},{{ this.src_lng }}),
-                  L.latLng({{ this.tgt_lat }},{{ this.tgt_lng }})
-                ],
-                router: L.Routing.osrmv1({
-                  serviceUrl:'https://router.project-osrm.org/route/v1',
-                  profile:'{{ this.profile }}'
-                }),
-                routeWhileDragging:false,
-                addWaypoints:false,
-                fitSelectedRoutes:true,
-                showAlternatives:false,
-                collapsible:true,
-                collapsed:false,
-                lineOptions:{
-                  styles:[{color:'{{ this.color }}',weight:5,opacity:0.85}],
-                  extendToWaypoints:false,
-                  missingRouteTolerance:0
-                },
-                createMarker:function(){return null;}
-              }).addTo({{ this._parent.get_name() }});
-              rc.on('routingerror',function(e){console.warn('Routing error:',e);});
-            })();
-            {% endmacro %}
-        """)
+# ── OSRM routing (pure Python — no JS deps, no black-map risk) ───────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_osrm_route(src_lat, src_lng, tgt_lat, tgt_lng, profile):
+    """Fetch real road route from public OSRM API. Returns (coords, distance_m, duration_s)."""
+    try:
+        url = (f"https://router.project-osrm.org/route/v1/{profile}/"
+               f"{src_lng},{src_lat};{tgt_lng},{tgt_lat}"
+               f"?overview=full&geometries=geojson&steps=false")
+        r = requests.get(url, timeout=8)
+        data = r.json()
+        if data.get("code") == "Ok":
+            route   = data["routes"][0]
+            coords  = [[c[1], c[0]] for c in route["geometry"]["coordinates"]]
+            return coords, route["distance"], route["duration"]
+    except Exception:
+        pass
+    return None, None, None
 
 st.set_page_config(layout="wide", page_title="Field Survey Navigator", page_icon="🗺️")
 
@@ -509,7 +446,7 @@ with map_col:
         tooltip=f"Origin: {st.session_state.selected_site}"
     ).add_to(m)
 
-    # ── Real road routing via Leaflet Routing Machine + OSRM ──
+    # ── Real road routing via OSRM (Python fetch → folium.PolyLine) ──
     if st.session_state.route_target and st.session_state.route_mode:
         tgt_rows = sites[sites["Site_Name"] == st.session_state.route_target]
         if not tgt_rows.empty:
@@ -518,8 +455,33 @@ with map_col:
             tgt_loc  = [tr["lat"], tr["lon"]]
             mode     = st.session_state.route_mode
             col_line = "#d29922" if mode == "drive" else "#3fb950"
-            # Add destination marker
-            label = "By Car" if mode == "drive" else "Walking"
+            profile  = "car" if mode == "drive" else "foot"
+            label    = "By Car" if mode == "drive" else "Walking"
+
+            # Fetch route from OSRM
+            coords, dist_m, dur_s = get_osrm_route(
+                src_loc[0], src_loc[1], tgt_loc[0], tgt_loc[1], profile
+            )
+
+            if coords:
+                # Draw road-following polyline
+                folium.PolyLine(
+                    coords, color=col_line, weight=5, opacity=0.85,
+                    tooltip=f"{label}: {dist_m/1000:.1f} km · {int(dur_s/60)} min"
+                ).add_to(m)
+                # Start dot
+                folium.CircleMarker(
+                    src_loc, radius=7, color=col_line,
+                    fill=True, fill_color=col_line, fill_opacity=1
+                ).add_to(m)
+            else:
+                # Fallback: straight dashed line if OSRM unreachable
+                folium.PolyLine(
+                    [src_loc, tgt_loc], color=col_line,
+                    weight=3, opacity=0.6, dash_array="8 6"
+                ).add_to(m)
+
+            # Destination label marker
             folium.Marker(
                 location=tgt_loc,
                 icon=folium.DivIcon(
@@ -529,8 +491,6 @@ with map_col:
                          f'{label} → {tr["distance_miles"]} mi</div>',
                     icon_size=(180, 24), icon_anchor=(90, 28))
             ).add_to(m)
-            # Add real-road routing control (draws actual road path via OSRM)
-            RoutingControl(src_loc, tgt_loc, mode, col_line).add_to(m)
 
     # ── Feature groups ──
     fg_out  = folium.FeatureGroup(name="Out of Range",  show=True)
